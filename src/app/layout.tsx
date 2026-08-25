@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Bowlby_One, Plus_Jakarta_Sans } from "next/font/google";
 import "./globals.css";
 import AppShell from "@/components/layout/AppShell";
+import { AuthProvider } from "@/components/auth/AuthProvider";
 
 const bowlby = Bowlby_One({
   variable: "--font-bowlby",
@@ -24,7 +25,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en" className={`${bowlby.variable} ${jakarta.variable} h-full`}>
       <body className="min-h-full">
-        <AppShell>{children}</AppShell>
+        <AuthProvider>
+          <AppShell>{children}</AppShell>
+        </AuthProvider>
       </body>
     </html>
   );

@@ -2,7 +2,9 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { LogOut } from "lucide-react";
 import clsx from "clsx";
+import { useAuth } from "@/components/auth/AuthProvider";
 
 const navItems = [
   { href: "/", label: "Net Worth" },
@@ -18,11 +20,21 @@ const navItems = [
 
 export default function MobileNav() {
   const pathname = usePathname();
+  const { user, signOut } = useAuth();
   return (
     <div className="lg:hidden sticky top-0 z-30 bg-card border-b border-border">
       <div className="flex items-center gap-2 px-4 py-3">
         <span className="text-xl leading-none">🍋</span>
         <span className="font-heading text-xl text-ink">Lime</span>
+        {user && (
+          <button
+            onClick={signOut}
+            aria-label="Sign out"
+            className="ml-auto flex items-center gap-1 rounded-full bg-cream px-2.5 py-1.5 text-xs font-semibold text-ink/70"
+          >
+            <LogOut size={13} /> Sign out
+          </button>
+        )}
       </div>
       <nav className="flex gap-1 overflow-x-auto no-scrollbar px-3 pb-3">
         {navItems.map((item) => {
