@@ -1,40 +1,50 @@
 "use client";
 
 import { Suspense, useState } from "react";
-import { useSearchParams } from "next/navigation";
-import { Mail, Loader2, CheckCircle2, AlertTriangle } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Mail, Lock, Loader2, AlertTriangle } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
+type Mode = "signin" | "signup";
+
 function LoginForm() {
-  const [email, setEmail] = useState("");
+  const router = useRouter();
   const searchParams = useSearchParams();
-  const redirectTo = searchParams.get("redirectTo");
-  const [status, setStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
-  const [error, setError] = useState<string | null>(
-    searchParams.get("error") ? "That sign-in link didn't work — it may have expired. Please request a new one." : null
-  );
+  const redirectTo = searchParams.get("redirectTo") || "/";
+  const [mode, setMode] = useState<Mode>("signin");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!email.trim() || status === "sending") return;
-    setStatus("sending");
+    if (loading || !email.trim() || !password) return;
+    setLoading(true);
     setError(null);
 
     const supabase = createClient();
-    const callbackUrl = new URL("/auth/callback", window.location.origin);
-    if (redirectTo) callbackUrl.searchParams.set("next", redirectTo);
+    const { error: authError } =
+      mode === "signup"
+        ? await supabase.auth.signUp({ email: email.trim(), password })
+        : await supabase.auth.signInWithPassword({ email: email.trim(), password });
 
-    const { error: otpError } = await supabase.auth.signInWithOtp({
-      email: email.trim(),
-      options: { emailRedirectTo: callbackUrl.toString() },
-    });
-
-    if (otpError) {
-      setStatus("error");
-      setError(otpError.message);
+    if (authError) {
+      setLoading(false);
+      setError(authError.message);
       return;
     }
-    setStatus("sent");
+
+    // Best-effort: seed net_worth_snapshots on first-ever sign-in. Never
+    // block getting into the app on this — it's a starting-data convenience.
+    try {
+      await fetch("/api/seed", { method: "POST" });
+    } catch {
+      // ignore — the app works fine without seeded data
+    }
+
+    router.push(redirectTo);
+    router.refresh();
   }
 
   return (
@@ -47,60 +57,82 @@ function LoginForm() {
         </div>
 
         <div className="rounded-3xl border border-border bg-card p-6 shadow-sm">
-          {status === "sent" ? (
-            <div className="flex flex-col items-center gap-3 py-4 text-center">
-              <span className="flex h-11 w-11 items-center justify-center rounded-full bg-green-bg text-green">
-                <CheckCircle2 size={22} />
-              </span>
-              <p className="font-heading text-lg text-ink">Check your email</p>
-              <p className="text-sm text-muted">
-                We sent a sign-in link to <span className="font-semibold text-ink">{email}</span>. Click it to open Lime.
-              </p>
-              <button
-                onClick={() => setStatus("idle")}
-                className="mt-1 text-xs font-semibold text-ink/60 underline underline-offset-2 hover:text-ink"
-              >
-                Use a different email
-              </button>
-            </div>
-          ) : (
-            <form onSubmit={handleSubmit}>
-              <h2 className="mb-1 font-heading text-xl text-ink">Sign in</h2>
-              <p className="mb-5 text-sm text-muted">Enter your email and we&apos;ll send you a magic link — no password needed.</p>
+          <div className="mb-5 flex rounded-full bg-cream p-1">
+            <button
+              type="button"
+              onClick={() => {
+                setMode("signin");
+                setError(null);
+              }}
+              className={`flex-1 rounded-full py-1.5 text-sm font-semibold transition-colors ${
+                mode === "signin" ? "bg-ink text-yellow" : "text-ink/60"
+              }`}
+            >
+              Sign In
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMode("signup");
+                setError(null);
+              }}
+              className={`flex-1 rounded-full py-1.5 text-sm font-semibold transition-colors ${
+                mode === "signup" ? "bg-ink text-yellow" : "text-ink/60"
+              }`}
+            >
+              Create Account
+            </button>
+          </div>
 
-              <label className="block">
-                <span className="text-xs font-semibold uppercase tracking-wide text-muted">Email</span>
-                <div className="relative mt-1.5">
-                  <Mail size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-muted" />
-                  <input
-                    type="email"
-                    required
-                    autoFocus
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="you@example.com"
-                    className="w-full rounded-xl border border-border bg-cream py-2.5 pl-10 pr-3.5 text-sm outline-none focus:border-ink/30"
-                  />
-                </div>
-              </label>
+          <form onSubmit={handleSubmit} className="space-y-3">
+            <label className="block">
+              <span className="text-xs font-semibold uppercase tracking-wide text-muted">Email</span>
+              <div className="relative mt-1.5">
+                <Mail size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-muted" />
+                <input
+                  type="email"
+                  required
+                  autoFocus
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  className="w-full rounded-xl border border-border bg-cream py-2.5 pl-10 pr-3.5 text-sm outline-none focus:border-ink/30"
+                />
+              </div>
+            </label>
 
-              {error && (
-                <div className="mt-3 flex items-start gap-1.5 rounded-xl bg-red-bg px-3 py-2.5 text-xs text-red">
-                  <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-                  <span>{error}</span>
-                </div>
-              )}
+            <label className="block">
+              <span className="text-xs font-semibold uppercase tracking-wide text-muted">Password</span>
+              <div className="relative mt-1.5">
+                <Lock size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-muted" />
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder={mode === "signup" ? "At least 6 characters" : "••••••••"}
+                  className="w-full rounded-xl border border-border bg-cream py-2.5 pl-10 pr-3.5 text-sm outline-none focus:border-ink/30"
+                />
+              </div>
+            </label>
 
-              <button
-                type="submit"
-                disabled={status === "sending" || !email.trim()}
-                className="mt-4 flex w-full items-center justify-center gap-2 rounded-full bg-yellow px-4 py-2.5 text-sm font-semibold text-ink hover:bg-yellow-dark disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {status === "sending" && <Loader2 size={15} className="animate-spin" />}
-                {status === "sending" ? "Sending..." : "Send magic link"}
-              </button>
-            </form>
-          )}
+            {error && (
+              <div className="flex items-start gap-1.5 rounded-xl bg-red-bg px-3 py-2.5 text-xs text-red">
+                <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                <span>{error}</span>
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={loading || !email.trim() || !password}
+              className="flex w-full items-center justify-center gap-2 rounded-full bg-yellow px-4 py-2.5 text-sm font-semibold text-ink hover:bg-yellow-dark disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {loading && <Loader2 size={15} className="animate-spin" />}
+              {loading ? "One sec..." : mode === "signup" ? "Create account" : "Sign in"}
+            </button>
+          </form>
         </div>
 
         <p className="mt-6 text-center text-xs text-muted">

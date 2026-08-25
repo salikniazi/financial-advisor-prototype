@@ -9,7 +9,8 @@ export type SeedResult = { seeded: boolean; rowCount?: number };
  * category histories. Idempotent: does nothing if the user already has any
  * rows. Uses the service-role client to bypass RLS — the caller is
  * responsible for having already verified `userId` against a real session
- * (see src/app/api/seed/route.ts and src/app/auth/callback/route.ts).
+ * (see src/app/api/seed/route.ts, called from src/app/login/page.tsx right
+ * after a successful sign-in).
  */
 export async function seedNetWorthSnapshotsForUser(userId: string): Promise<SeedResult> {
   const supabase = createServiceRoleClient();

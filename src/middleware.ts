@@ -1,9 +1,9 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-// Routes reachable without a signed-in session: the login page itself and the
-// magic-link callback that establishes the session in the first place.
-const PUBLIC_PATHS = ["/login", "/auth/callback"];
+// Routes reachable without a signed-in session: just the login page, which
+// establishes an anonymous session in a single click.
+const PUBLIC_PATHS = ["/login"];
 
 function isPublicPath(pathname: string): boolean {
   return PUBLIC_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`));

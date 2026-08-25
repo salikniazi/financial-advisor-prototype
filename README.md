@@ -8,13 +8,13 @@ the Stocks/Crypto research assistant, and the "Others" document-parsing flow) ca
 OpenRouter, using tool calling to read from that same mock data rather than having it stuffed into
 the prompt.
 
-> **This branch (`feature/supabase-auth`) also adds real Supabase-backed auth (magic link) and one
-> database table**, `net_worth_snapshots` — see [Auth &amp; database](#auth--database-this-branch)
-> below. `main` stays exactly as it was: no sign-in required, no database. This branch requires
-> signing in to use the app at all; nothing in the UI reads from Supabase yet beyond the one seeded
-> table (verify it via the Supabase dashboard, not through any screen) — every screen still reads
-> from `src/lib/mock/*` exactly as before. Individual holdings tables and wiring screens to real
-> data are future work, one category at a time.
+> **This branch (`feature/supabase-auth`) also adds real Supabase-backed auth (email + password)
+> and one database table**, `net_worth_snapshots` — see
+> [Auth &amp; database](#auth--database-this-branch) below. `main` stays exactly as it was: no
+> sign-in required, no database. This branch requires signing in to use the app at all; nothing in
+> the UI reads from Supabase yet beyond the one seeded table (verify it via the Supabase dashboard,
+> not through any screen) — every screen still reads from `src/lib/mock/*` exactly as before.
+> Individual holdings tables and wiring screens to real data are future work, one category at a time.
 
 ## Getting Started
 
@@ -49,8 +49,10 @@ of crashing — the rest of the app works normally either way.
 ## Auth &amp; database (this branch)
 
 This branch requires signing in — every route redirects a signed-out visitor to `/login` via
-`src/middleware.ts`. Auth is **magic link only** (Supabase's passwordless OTP-via-email), no
-password, no OAuth.
+`src/middleware.ts`. Auth is **Supabase email + password** (`signUp` / `signInWithPassword`), no
+OAuth. Deliberately simplified for a prototype: **email confirmation is disabled** on the Supabase
+side (Authentication → Sign In / Providers → Email → turn off "Confirm email"), so `signUp()`
+returns an active session immediately — no email round-trip, no magic link, no rate limits to fight.
 
 Required env vars (see `.env.example`), from your Supabase project's Settings → API:
 
@@ -66,9 +68,9 @@ provision or migrate your Supabase project for you.
 That migration creates exactly **one table**, `net_worth_snapshots` — a long/narrow record of
 `(user_id, month, category, value)`, RLS-scoped to `auth.uid() = user_id`, with liability
 categories (`loans`, `credit_cards`, `bnpl`) stored as negative values so a month's net worth is
-always just `sum(value)`. On a user's first-ever sign-in, `src/app/auth/callback/route.ts` seeds
-this table from `assetRows`/`liabilityRows`' 12-month histories in `src/lib/mock/netWorth.ts` —
-idempotent, never reseeds or duplicates on later sign-ins.
+always just `sum(value)`. Right after a successful sign-up or sign-in, `src/app/login/page.tsx`
+calls `/api/seed`, which seeds this table from `assetRows`/`liabilityRows`' 12-month histories in
+`src/lib/mock/netWorth.ts` — idempotent, never reseeds or duplicates on a later sign-in.
 
 **Nothing in the UI reads from this table yet** — every screen still reads from `src/lib/mock/*`
 exactly as it did before this branch existed. Verify the seeded data via the Supabase dashboard's
@@ -83,7 +85,7 @@ wiring any screen to real data are future passes, one category at a time.
 - **Recharts** for value-over-time and price charts
 - **lucide-react** for icons
 - **OpenRouter** (OpenAI-compatible `chat/completions`, tool calling) for the AI surfaces above
-- **Supabase** (`@supabase/supabase-js` + `@supabase/ssr`) for magic-link auth and the one
+- **Supabase** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password auth and the one
   `net_worth_snapshots` table described above — this branch only
 - All financial data shown in the app lives in `src/lib/mock/*` — no backend, no other external calls
 
