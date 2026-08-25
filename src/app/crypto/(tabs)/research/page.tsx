@@ -2,7 +2,7 @@ import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import Screener from "@/components/research/Screener";
 import ResearchChat from "@/components/ai/ResearchChat";
 import { cryptoNews } from "@/lib/mock/crypto";
-import { cryptoResearchPrompts } from "@/lib/ai/researchRespond";
+import { cryptoResearchPrompts } from "@/lib/ai/suggestedPrompts";
 import { Newspaper } from "lucide-react";
 
 export default function CryptoResearchPage() {

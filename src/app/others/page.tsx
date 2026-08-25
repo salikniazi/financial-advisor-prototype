@@ -7,8 +7,7 @@ import { Card, CardBody } from "@/components/ui/Card";
 import AddAssetFlow from "@/components/others/AddAssetFlow";
 import AssetItemModal from "@/components/others/AssetItemModal";
 import { otherAssets as seedAssets } from "@/lib/mock/others";
-import { OtherAsset } from "@/lib/types";
-import { ParsedAsset } from "@/lib/ai/parseAsset";
+import { OtherAsset, ParsedAsset } from "@/lib/types";
 import { formatPKR } from "@/lib/format";
 
 const STORAGE_KEY = "lime-others-assets";

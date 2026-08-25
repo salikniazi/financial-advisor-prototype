@@ -1,10 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { FileUp, Sparkles, Loader2, X, FileText, Check, Pencil } from "lucide-react";
-import { mockParseAsset, ParsedAsset } from "@/lib/ai/parseAsset";
+import { FileUp, Sparkles, Loader2, X, FileText, Check, Pencil, AlertTriangle } from "lucide-react";
+import { ParsedAsset } from "@/lib/types";
 
-type Step = "choose" | "upload" | "paste" | "parsing" | "review";
+type Step = "choose" | "upload" | "paste" | "parsing" | "review" | "error";
 
 const mockFileNames = ["FD_certificate.pdf", "NSC_savings_certificate.pdf", "PF_statement_2026.pdf"];
 
@@ -15,22 +15,41 @@ export default function AddAssetFlow({ onClose, onAdd }: { onClose: () => void; 
   const [parsed, setParsed] = useState<ParsedAsset | null>(null);
   const [editedFields, setEditedFields] = useState<Record<string, string>>({});
   const [editedName, setEditedName] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [lastSourceText, setLastSourceText] = useState("");
 
-  function startParsing(sourceText: string) {
+  async function startParsing(sourceText: string) {
+    setLastSourceText(sourceText);
     setStep("parsing");
-    setTimeout(() => {
-      const result = mockParseAsset(sourceText);
+    try {
+      const res = await fetch("/api/parse-asset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: sourceText }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        setError(data.error || "Lime couldn't read that document. Please try again.");
+        setStep("error");
+        return;
+      }
+      const result = data as ParsedAsset;
       setParsed(result);
       setEditedFields(result.fields);
       setEditedName(result.name);
       setStep("review");
-    }, 1600);
+    } catch {
+      setError("Couldn't reach Lime's AI right now. Check your connection and try again.");
+      setStep("error");
+    }
   }
 
   function handleUploadClick() {
     const name = mockFileNames[Math.floor(Math.random() * mockFileNames.length)];
     setFileName(name);
-    setTimeout(() => startParsing(name), 400);
+    // No real file storage/OCR in this prototype — we still route the filename
+    // through the real extraction model so the "AI reads a document" moment is genuine.
+    startParsing(`Document filename: ${name}. Assume typical Pakistani financial-product terms implied by this filename and a reasonable current value.`);
   }
 
   function confirm() {
@@ -117,7 +136,7 @@ export default function AddAssetFlow({ onClose, onAdd }: { onClose: () => void; 
                 className="w-full rounded-2xl border border-border bg-cream p-4 text-sm outline-none focus:border-ink/30"
               />
               <button
-                onClick={() => startParsing(pastedText || "fixed deposit")}
+                onClick={() => startParsing(pastedText)}
                 disabled={!pastedText.trim()}
                 className="mt-3 flex items-center gap-2 rounded-full bg-ink px-4 py-2 text-xs font-semibold text-yellow hover:opacity-90 disabled:opacity-40"
               >
@@ -131,6 +150,22 @@ export default function AddAssetFlow({ onClose, onAdd }: { onClose: () => void; 
               <Loader2 size={28} className="animate-spin text-yellow-dark" />
               <p className="text-sm font-semibold text-ink">Reading your document...</p>
               <p className="text-xs text-muted max-w-xs">Lime is extracting the key details and structuring them into fields you can confirm.</p>
+            </div>
+          )}
+
+          {step === "error" && (
+            <div className="flex flex-col items-center justify-center gap-3 py-10 text-center">
+              <span className="flex h-11 w-11 items-center justify-center rounded-full bg-red-bg text-red">
+                <AlertTriangle size={20} />
+              </span>
+              <p className="text-sm font-semibold text-ink">Couldn&apos;t structure that</p>
+              <p className="text-xs text-muted max-w-xs">{error}</p>
+              <button
+                onClick={() => startParsing(lastSourceText)}
+                className="mt-1 rounded-full bg-ink px-4 py-2 text-xs font-semibold text-yellow hover:opacity-90"
+              >
+                Try again
+              </button>
             </div>
           )}
 

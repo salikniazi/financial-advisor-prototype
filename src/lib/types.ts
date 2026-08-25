@@ -115,3 +115,11 @@ export type OtherAsset = {
   currentValue: number;
   fields: Record<string, string>;
 };
+
+// The shape the "Others" asset-parsing AI extracts, before an id is assigned.
+export type ParsedAsset = {
+  name: string;
+  type: string;
+  currentValue: number;
+  fields: Record<string, string>;
+};

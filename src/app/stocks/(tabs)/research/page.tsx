@@ -2,7 +2,7 @@ import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import Screener from "@/components/research/Screener";
 import ResearchChat from "@/components/ai/ResearchChat";
 import { stockNews } from "@/lib/mock/stocks";
-import { stockResearchPrompts } from "@/lib/ai/researchRespond";
+import { stockResearchPrompts } from "@/lib/ai/suggestedPrompts";
 import { Newspaper } from "lucide-react";
 
 export default function StocksResearchPage() {
