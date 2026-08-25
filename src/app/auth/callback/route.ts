@@ -11,21 +11,25 @@ export async function GET(request: Request) {
   const code = searchParams.get("code");
   const next = searchParams.get("next") ?? "/";
 
-  if (code) {
-    const supabase = await createClient();
-    const { data, error } = await supabase.auth.exchangeCodeForSession(code);
-
-    if (!error && data.user) {
-      try {
-        await seedNetWorthSnapshotsForUser(data.user.id);
-      } catch (seedError) {
-        // Never block sign-in on a seed failure — this is a starting-data
-        // convenience, not part of the auth flow itself. Surface via logs.
-        console.error("[auth/callback] seed failed:", seedError);
-      }
-      return NextResponse.redirect(`${origin}${next}`);
-    }
+  if (!code) {
+    console.error("[auth/callback] no code param on request:", request.url);
+    return NextResponse.redirect(`${origin}/login?error=auth`);
   }
 
-  return NextResponse.redirect(`${origin}/login?error=auth`);
+  const supabase = await createClient();
+  const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+
+  if (error || !data.user) {
+    console.error("[auth/callback] exchangeCodeForSession failed:", error?.message, error?.status);
+    return NextResponse.redirect(`${origin}/login?error=auth`);
+  }
+
+  try {
+    await seedNetWorthSnapshotsForUser(data.user.id);
+  } catch (seedError) {
+    // Never block sign-in on a seed failure — this is a starting-data
+    // convenience, not part of the auth flow itself. Surface via logs.
+    console.error("[auth/callback] seed failed:", seedError);
+  }
+  return NextResponse.redirect(`${origin}${next}`);
 }
