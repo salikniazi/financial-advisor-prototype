@@ -4,6 +4,24 @@ import { assetRows, liabilityRows } from "@/lib/mock/netWorth";
 
 export type SeedResult = { seeded: boolean; rowCount?: number };
 
+// assetRows/liabilityRows use camelCase `key`s (mutualFunds, creditCards) for
+// UI/tool-calling use elsewhere in the app; the net_worth_snapshots table's
+// `category` check constraint uses snake_case. Map explicitly here rather
+// than renaming `key` everywhere else.
+const CATEGORY_BY_ROW_KEY: Record<string, string> = {
+  bank: "bank",
+  stocks: "stocks",
+  mutualFunds: "mutual_funds",
+  property: "property",
+  vehicle: "vehicle",
+  crypto: "crypto",
+  gold: "gold",
+  others: "others",
+  loans: "loans",
+  creditCards: "credit_cards",
+  bnpl: "bnpl",
+};
+
 /**
  * One-time, per-user seed of net_worth_snapshots from the mock data's
  * category histories. Idempotent: does nothing if the user already has any
@@ -27,14 +45,18 @@ export async function seedNetWorthSnapshotsForUser(userId: string): Promise<Seed
     return { seeded: false };
   }
 
-  const rows = [...assetRows, ...liabilityRows].flatMap((row) =>
-    row.history.map((point) => ({
+  const rows = [...assetRows, ...liabilityRows].flatMap((row) => {
+    const category = CATEGORY_BY_ROW_KEY[row.key];
+    if (!category) {
+      throw new Error(`No net_worth_snapshots category mapping for row key "${row.key}"`);
+    }
+    return row.history.map((point) => ({
       user_id: userId,
       month: `${point.month}-01`, // MonthPoint.month is "YYYY-MM" -> first of month
-      category: row.key,
+      category,
       value: row.isLiability ? -point.value : point.value,
-    }))
-  );
+    }));
+  });
 
   if (rows.length === 0) {
     return { seeded: true, rowCount: 0 };
