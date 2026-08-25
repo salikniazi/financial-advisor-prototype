@@ -58,8 +58,6 @@ Required env vars (see `.env.example`), from your Supabase project's Settings �
 
 - `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` — safe to expose to the browser;
   access is restricted by Row Level Security (RLS), not by secrecy.
-- `SUPABASE_SERVICE_ROLE_KEY` — server-only, used solely by the one-time per-user seed
-  (`src/app/api/seed/route.ts`) to bypass RLS. Never exposed to the client.
 
 You'll also need to apply the one migration in `supabase/migrations/` (via the Supabase dashboard's
 SQL editor, or `supabase db push`) before signing in will fully work — this repo's tooling doesn't
@@ -68,14 +66,13 @@ provision or migrate your Supabase project for you.
 That migration creates exactly **one table**, `net_worth_snapshots` — a long/narrow record of
 `(user_id, month, category, value)`, RLS-scoped to `auth.uid() = user_id`, with liability
 categories (`loans`, `credit_cards`, `bnpl`) stored as negative values so a month's net worth is
-always just `sum(value)`. Right after a successful sign-up or sign-in, `src/app/login/page.tsx`
-calls `/api/seed`, which seeds this table from `assetRows`/`liabilityRows`' 12-month histories in
-`src/lib/mock/netWorth.ts` — idempotent, never reseeds or duplicates on a later sign-in.
+always just `sum(value)`. It starts **empty** for every account — there is no seeding step, so a
+new sign-up has zero rows rather than 12 months of generated history.
 
 **Nothing in the UI reads from this table yet** — every screen still reads from `src/lib/mock/*`
-exactly as it did before this branch existed. Verify the seeded data via the Supabase dashboard's
-table editor, not through the app. Individual-category tables (stocks, crypto, property, etc.) and
-wiring any screen to real data are future passes, one category at a time.
+exactly as it did before this branch existed (there's no real bank/brokerage/FBR integration behind
+any of it). Individual-category tables (stocks, crypto, property, etc.) and wiring any screen to
+real data are future passes, one category at a time.
 
 ## Stack
 

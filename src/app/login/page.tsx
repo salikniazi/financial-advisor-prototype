@@ -35,18 +35,6 @@ function LoginForm() {
       return;
     }
 
-    // Best-effort: seed net_worth_snapshots on first-ever sign-in. Never
-    // block getting into the app on this — it's a starting-data convenience.
-    try {
-      const seedRes = await fetch("/api/seed", { method: "POST" });
-      if (!seedRes.ok) {
-        const body = await seedRes.json().catch(() => null);
-        console.error("[login] /api/seed failed:", seedRes.status, body?.error);
-      }
-    } catch (err) {
-      console.error("[login] /api/seed request failed:", err);
-    }
-
     router.push(redirectTo);
     router.refresh();
   }
