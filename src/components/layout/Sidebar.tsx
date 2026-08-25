@@ -33,9 +33,7 @@ export default function Sidebar() {
   return (
     <aside className="hidden lg:flex w-64 shrink-0 flex-col border-r border-border bg-card px-4 py-6">
       <Link href="/" className="flex items-center gap-2 px-2 mb-8">
-        <span className="flex h-9 w-9 items-center justify-center rounded-full bg-yellow border-2 border-ink text-lg leading-none">
-          🍋
-        </span>
+        <span className="text-2xl leading-none">🍋</span>
         <span className="font-heading text-2xl text-ink">Lime</span>
       </Link>
 

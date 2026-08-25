@@ -21,9 +21,7 @@ export default function MobileNav() {
   return (
     <div className="lg:hidden sticky top-0 z-30 bg-card border-b border-border">
       <div className="flex items-center gap-2 px-4 py-3">
-        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-yellow border-2 border-ink text-sm leading-none">
-          🍋
-        </span>
+        <span className="text-xl leading-none">🍋</span>
         <span className="font-heading text-xl text-ink">Lime</span>
       </div>
       <nav className="flex gap-1 overflow-x-auto no-scrollbar px-3 pb-3">
