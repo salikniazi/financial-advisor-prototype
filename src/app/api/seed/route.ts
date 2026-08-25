@@ -25,6 +25,7 @@ export async function POST() {
     const result = await seedNetWorthSnapshotsForUser(user.id);
     return NextResponse.json(result);
   } catch (err) {
+    console.error("[api/seed] failed for user", user.id, ":", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
   }
 }
