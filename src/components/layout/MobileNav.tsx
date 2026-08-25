@@ -1,0 +1,48 @@
+"use client";
+
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import clsx from "clsx";
+
+const navItems = [
+  { href: "/", label: "Net Worth" },
+  { href: "/stocks", label: "Stocks" },
+  { href: "/crypto", label: "Crypto" },
+  { href: "/mutual-funds", label: "Mutual Funds" },
+  { href: "/property", label: "Property" },
+  { href: "/vehicle", label: "Vehicle" },
+  { href: "/gold", label: "Gold" },
+  { href: "/others", label: "Others" },
+  { href: "/tax", label: "Tax Filing" },
+];
+
+export default function MobileNav() {
+  const pathname = usePathname();
+  return (
+    <div className="lg:hidden sticky top-0 z-30 bg-card border-b border-border">
+      <div className="flex items-center gap-2 px-4 py-3">
+        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-yellow border-2 border-ink text-sm leading-none">
+          🍋
+        </span>
+        <span className="font-heading text-xl text-ink">Lime</span>
+      </div>
+      <nav className="flex gap-1 overflow-x-auto no-scrollbar px-3 pb-3">
+        {navItems.map((item) => {
+          const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={clsx(
+                "whitespace-nowrap rounded-full px-3 py-1.5 text-sm font-semibold",
+                active ? "bg-ink text-yellow" : "bg-cream text-ink/70"
+              )}
+            >
+              {item.label}
+            </Link>
+          );
+        })}
+      </nav>
+    </div>
+  );
+}
