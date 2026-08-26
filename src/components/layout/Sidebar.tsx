@@ -34,7 +34,7 @@ export default function Sidebar() {
   const { user, signOut } = useAuth();
 
   return (
-    <aside className="hidden lg:flex w-64 shrink-0 flex-col border-r border-border bg-card px-4 py-6">
+    <aside className="hidden lg:sticky lg:top-0 lg:flex lg:h-screen w-64 shrink-0 flex-col overflow-y-auto border-r border-border bg-card px-4 py-6">
       <Link href="/" className="flex items-center gap-2 px-2 mb-8">
         <span className="text-2xl leading-none">🍋</span>
         <span className="font-heading text-2xl text-ink">Lime</span>
