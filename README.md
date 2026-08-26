@@ -8,13 +8,11 @@ the Stocks/Crypto research assistant, and the "Others" document-parsing flow) ca
 OpenRouter, using tool calling to read from that same mock data rather than having it stuffed into
 the prompt.
 
-> **This branch (`feature/supabase-auth`) also adds real Supabase-backed auth (email + password)
-> and one database table**, `net_worth_snapshots` — see
-> [Auth &amp; database](#auth--database-this-branch) below. `main` stays exactly as it was: no
-> sign-in required, no database. This branch requires signing in to use the app at all; nothing in
-> the UI reads from Supabase yet beyond the one seeded table (verify it via the Supabase dashboard,
-> not through any screen) — every screen still reads from `src/lib/mock/*` exactly as before.
-> Individual holdings tables and wiring screens to real data are future work, one category at a time.
+> This app adds real Supabase-backed auth (email + password) and a handful of database tables — see
+> [Auth &amp; database](#auth--database) and [Bank statement pipeline](#bank-statement-pipeline-stage-a)
+> below. The app requires signing in to use at all. Every screen except the bank statement upload
+> flow described below still reads from `src/lib/mock/*` — which now starts empty rather than
+> pre-populated with fake numbers. Wiring more of the app to real data is ongoing, one piece at a time.
 
 ## Getting Started
 
@@ -46,9 +44,9 @@ local development, or as a Project → Settings → Environment Variable in Verc
 app. **Without it set, the three chat UIs show a clear inline "AI not configured" error** instead
 of crashing — the rest of the app works normally either way.
 
-## Auth &amp; database (this branch)
+## Auth &amp; database
 
-This branch requires signing in — every route redirects a signed-out visitor to `/login` via
+The app requires signing in — every route redirects a signed-out visitor to `/login` via
 `src/middleware.ts`. Auth is **Supabase email + password** (`signUp` / `signInWithPassword`), no
 OAuth. Deliberately simplified for a prototype: **email confirmation is disabled** on the Supabase
 side (Authentication → Sign In / Providers → Email → turn off "Confirm email"), so `signUp()`
@@ -59,20 +57,51 @@ Required env vars (see `.env.example`), from your Supabase project's Settings �
 - `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` — safe to expose to the browser;
   access is restricted by Row Level Security (RLS), not by secrecy.
 
-You'll also need to apply the one migration in `supabase/migrations/` (via the Supabase dashboard's
+You'll also need to apply the migrations in `supabase/migrations/` (via the Supabase dashboard's
 SQL editor, or `supabase db push`) before signing in will fully work — this repo's tooling doesn't
 provision or migrate your Supabase project for you.
 
-That migration creates exactly **one table**, `net_worth_snapshots` — a long/narrow record of
+The first migration creates `net_worth_snapshots` — a long/narrow record of
 `(user_id, month, category, value)`, RLS-scoped to `auth.uid() = user_id`, with liability
 categories (`loans`, `credit_cards`, `bnpl`) stored as negative values so a month's net worth is
 always just `sum(value)`. It starts **empty** for every account — there is no seeding step, so a
-new sign-up has zero rows rather than 12 months of generated history.
+new sign-up has zero rows rather than generated history.
 
-**Nothing in the UI reads from this table yet** — every screen still reads from `src/lib/mock/*`
-exactly as it did before this branch existed (there's no real bank/brokerage/FBR integration behind
-any of it). Individual-category tables (stocks, crypto, property, etc.) and wiring any screen to
-real data are future passes, one category at a time.
+**Nothing in the UI reads from this table yet** — every screen except the bank statement upload
+flow below still reads from `src/lib/mock/*` (which now starts empty too — there's no real
+bank/brokerage/FBR integration behind any of it). Wiring more screens to real data, and swapping
+`net_worth_snapshots`'s `bank` category over to the pipeline below, are future passes.
+
+## Bank statement pipeline (Stage A)
+
+The second migration (`supabase/migrations/20260826120000_bank_statements.sql`) adds the first
+piece of a real bank statement pipeline — **schema, file storage, and upload capture only**. It
+does not read a PDF's contents yet:
+
+- **`bank_accounts`** — metadata about an account the user has told the app about (bank, account
+  type, optional nickname/masked account number).
+- **`bank_statement_imports`** — one row per uploaded PDF: which account, filename, upload time,
+  and a `status` (`uploaded` / `processing` / `needs_review` / `completed` / `failed`) that stays
+  at `uploaded` for now, since nothing yet moves it further.
+- **`bank_transactions`** — one row per transaction, linked to its account and import. Created
+  empty; no code path in this stage writes to it. The fixed category list it will eventually use
+  lives in `src/lib/bank/categories.ts`, mirrored exactly by a `check` constraint on the table.
+
+All three follow the same per-user RLS pattern as `net_worth_snapshots` (explicit
+select/insert/update/delete policies checking `auth.uid() = user_id`), plus an extra check on
+insert that `account_id` (and, for transactions, `statement_import_id`) actually belongs to the
+signed-in user.
+
+Uploaded PDFs go to a **private Supabase Storage bucket, `bank-statements`** (created by the same
+migration via `insert into storage.buckets ...` — nothing to set up separately), at
+`{user_id}/{statement_import_id}/{original_filename}`, with Storage RLS policies restricting
+access to whichever user's ID is the first path segment. The upload UI also enforces PDF-only and
+a 15MB size cap client-side.
+
+Try it at **Bank → Statements** (`/bank/statements`): add an account, upload a PDF, and see it
+listed with its status. That's the entire surface of this stage — there's no "process this
+statement" action, because nothing on the other end of it exists yet. Extracting transactions from
+the PDF, categorizing them, and computing balances are future stages.
 
 ## Stack
 

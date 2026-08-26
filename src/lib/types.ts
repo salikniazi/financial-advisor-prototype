@@ -123,3 +123,53 @@ export type ParsedAsset = {
   currentValue: number;
   fields: Record<string, string>;
 };
+
+// --- Real Supabase-backed types (bank statement pipeline, Stage A onward) ---
+// These map directly to their table's columns (snake_case, as returned by
+// supabase-js) rather than the display-shaped mock types above.
+
+export type BankAccountRecord = {
+  id: string;
+  user_id: string;
+  bank_name: string;
+  account_type: string;
+  account_number_masked: string | null;
+  nickname: string | null;
+  currency: string;
+  created_at: string;
+};
+
+export type BankStatementImportStatus = "uploaded" | "processing" | "needs_review" | "completed" | "failed";
+
+export type BankStatementImportRecord = {
+  id: string;
+  user_id: string;
+  account_id: string;
+  file_path: string;
+  file_name: string;
+  uploaded_at: string;
+  period_start: string | null;
+  period_end: string | null;
+  has_running_balance: boolean | null;
+  status: BankStatementImportStatus;
+  error_message: string | null;
+};
+
+export type BankTransactionRecord = {
+  id: string;
+  user_id: string;
+  account_id: string;
+  statement_import_id: string;
+  transaction_date: string;
+  description: string;
+  instrument_number: string | null;
+  debit: number | null;
+  credit: number | null;
+  amount: number;
+  balance_after: number | null;
+  balance_source: "stated" | "computed" | null;
+  category: string | null;
+  reviewed: boolean;
+  fingerprint: string;
+  created_at: string;
+};
