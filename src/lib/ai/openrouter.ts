@@ -1,11 +1,41 @@
 // Server-side only. Never import this from a client component — it reads
 // OPENROUTER_API_KEY from process.env and calls OpenRouter directly.
 
-// The model is intentionally fixed, not configurable via env var: every AI
-// surface in this app must use exactly this model.
+// Two models, by role. This used to be one fixed model for every AI surface
+// in the app -- that invariant predates the bank-statement work and no
+// longer holds now that statement extraction needs a model chosen for
+// reasoning quality on an unfamiliar document, not for cost.
+//
+// Role B: everything that was already here (the global assistant, the
+// research assistant, asset parsing) plus statement categorisation. Bulk,
+// cheap, no real reasoning required -- optimise for cost and latency.
 export const MODEL = "deepseek/deepseek-v4-flash-0731";
 
+// Role A: statement vision extraction and row repair. Rare (fanned out
+// per-page but still just a handful of calls per statement), and correctness
+// matters more than cost -- this is the model that actually has to make sense
+// of an unfamiliar document, so reasoning quality is the only thing to
+// select on.
+//
+// The placeholder below is deliberately not a real model id. An earlier
+// version of this constant named a specific slug that turned out to be
+// fabricated -- there was no source for it, just a guess that looked
+// plausible. A wrong-but-real-looking slug can fail silently (OpenRouter
+// might resolve it to some other real model); a placeholder this obviously
+// not-a-slug can only ever fail loudly, which is what should happen until
+// someone actually confirms the real one against OpenRouter's live
+// catalogue. Override with OPENROUTER_REASONING_MODEL before deploying
+// anything that calls Role A.
+const REASONING_MODEL_PLACEHOLDER = "REPLACE_ME/verify-on-openrouter-before-deploy";
+export const REASONING_MODEL = process.env.OPENROUTER_REASONING_MODEL || REASONING_MODEL_PLACEHOLDER;
+
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+
+// Requests are aborted this long before the platform's own 60s function
+// budget so a hung request fails with a message this code can act on,
+// instead of the whole function being killed with no chance to record
+// anything.
+const DEFAULT_TIMEOUT_MS = 45_000;
 
 export type ChatRole = "system" | "user" | "assistant" | "tool";
 
@@ -15,9 +45,22 @@ export type ToolCall = {
   function: { name: string; arguments: string };
 };
 
+/**
+ * A multimodal message part. Only text and file parts are modelled -- no
+ * image_url, since nothing here sends raw images; PDF pages go through as
+ * file parts (OpenRouter's documented mechanism for PDF input), decided in
+ * favour of client/server-side rasterisation specifically because this stack
+ * has no way to rasterise a PDF page (see statementTable.ts's history --
+ * pdfjs-dist's canvas polyfill and worker both failed under Next's
+ * serverless bundling).
+ */
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "file"; file: { filename: string; file_data: string } };
+
 export type ChatMessage = {
   role: ChatRole;
-  content: string | null;
+  content: string | ContentPart[] | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   name?: string;
@@ -40,15 +83,33 @@ export type ToolExecutor = (args: any) => Promise<unknown> | unknown;
 
 export type OpenRouterResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
+/**
+ * OpenRouter's PDF-handling plugin. The `engine` values are documented as
+ * text-extraction, OCR, and native/model-handled modes, but the exact
+ * current names are unverified from this environment (openrouter.ai is
+ * blocked here) -- confirm against their docs before relying on a specific
+ * engine. Loosely typed on purpose rather than a fabricated enum.
+ */
+export type OpenRouterPlugin = { id: "file-parser"; pdf?: { engine: string } } | Record<string, unknown>;
+
 type RawCompletionResponse = {
   choices?: { message?: ChatMessage; finish_reason?: string }[];
   error?: { message?: string };
 };
 
+type CompletionValue = { message: ChatMessage; finishReason: string | null };
+
 async function rawChatCompletion(
   messages: ChatMessage[],
-  opts?: { tools?: ToolDef[]; tool_choice?: "auto" | { type: "function"; function: { name: string } } }
-): Promise<OpenRouterResult<ChatMessage>> {
+  opts?: {
+    model?: string;
+    tools?: ToolDef[];
+    tool_choice?: "auto" | { type: "function"; function: { name: string } };
+    maxTokens?: number;
+    timeoutMs?: number;
+    plugins?: OpenRouterPlugin[];
+  }
+): Promise<OpenRouterResult<CompletionValue>> {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
     return { ok: false, error: "OPENROUTER_API_KEY is not set. Add it to your environment to enable Lime's AI features." };
@@ -66,14 +127,21 @@ async function rawChatCompletion(
         "X-Title": "Lime",
       },
       body: JSON.stringify({
-        model: MODEL,
+        model: opts?.model ?? MODEL,
         messages,
+        max_tokens: opts?.maxTokens ?? 4096,
         ...(opts?.tools ? { tools: opts.tools } : {}),
         ...(opts?.tool_choice ? { tool_choice: opts.tool_choice } : {}),
+        ...(opts?.plugins ? { plugins: opts.plugins } : {}),
       }),
+      signal: AbortSignal.timeout(opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     });
   } catch (err) {
-    return { ok: false, error: `Could not reach OpenRouter: ${err instanceof Error ? err.message : String(err)}` };
+    const timedOut = err instanceof Error && err.name === "TimeoutError";
+    return {
+      ok: false,
+      error: timedOut ? "OpenRouter didn't respond in time." : `Could not reach OpenRouter: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
 
   let body: RawCompletionResponse;
@@ -85,15 +153,19 @@ async function rawChatCompletion(
 
   if (!response.ok) {
     const message = body?.error?.message ?? `OpenRouter request failed with status ${response.status}.`;
-    return { ok: false, error: message };
+    // Name the configured model id explicitly rather than a bare status --
+    // an "unknown model" failure needs to say *which* id was wrong, since the
+    // reasoning-model slug is only a placeholder until someone confirms it.
+    const withModel = /model/i.test(message) ? `${message} (configured model: "${opts?.model ?? MODEL}")` : message;
+    return { ok: false, error: withModel };
   }
 
-  const message = body.choices?.[0]?.message;
-  if (!message) {
+  const choice = body.choices?.[0];
+  if (!choice?.message) {
     return { ok: false, error: "OpenRouter returned an empty response." };
   }
 
-  return { ok: true, value: message };
+  return { ok: true, value: { message: choice.message, finishReason: choice.finish_reason ?? null } };
 }
 
 /**
@@ -118,11 +190,11 @@ export async function runToolLoop(opts: {
     const result = await rawChatCompletion(messages, { tools, tool_choice: "auto" });
     if (!result.ok) return result;
 
-    const message = result.value;
+    const { message } = result.value;
     messages.push(message);
 
     if (!message.tool_calls || message.tool_calls.length === 0) {
-      return { ok: true, value: { text: message.content ?? "", toolCalls: toolCallLog } };
+      return { ok: true, value: { text: typeof message.content === "string" ? message.content : "", toolCalls: toolCallLog } };
     }
 
     for (const call of message.tool_calls) {
@@ -138,8 +210,12 @@ export async function runToolLoop(opts: {
           args = {};
         }
         toolCallLog.push({ name: call.function.name, args });
-        // Server-side visibility that the model is actually calling tools, not hallucinating.
-        console.log(`[lime-ai] tool call: ${call.function.name}`, args);
+        // Server-side visibility that the model is actually calling tools,
+        // not hallucinating -- name only, not the arguments themselves.
+        // Statement categorisation now runs through this loop and its
+        // arguments carry real merchant/transaction text; logging them in
+        // full would put that in Vercel's logs for no operational benefit.
+        console.log(`[lime-ai] tool call: ${call.function.name}`);
         try {
           toolResult = await executor(args);
         } catch (err) {
@@ -165,17 +241,21 @@ export async function runToolLoop(opts: {
 }
 
 /**
- * For structured extraction (Part 4): forces the model to call exactly one
- * tool and returns its parsed arguments, rather than asking for JSON in prose
- * (this model doesn't support response_format / JSON mode). Retries once on a
- * missing or unparsable tool call.
+ * For structured extraction: forces the model to call exactly one tool and
+ * returns its parsed arguments, rather than asking for JSON in prose (most
+ * models used here don't support response_format / JSON mode). Retries once
+ * on a missing or unparsable tool call.
  */
 export async function extractWithForcedTool<T>(opts: {
   systemPrompt: string;
-  userContent: string;
+  userContent: string | ContentPart[];
   tool: ToolDef;
+  model?: string;
+  maxTokens?: number;
+  timeoutMs?: number;
+  plugins?: OpenRouterPlugin[];
 }): Promise<OpenRouterResult<T>> {
-  const { systemPrompt, userContent, tool } = opts;
+  const { systemPrompt, userContent, tool, model, maxTokens, timeoutMs, plugins } = opts;
   const messages: ChatMessage[] = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userContent },
@@ -183,24 +263,43 @@ export async function extractWithForcedTool<T>(opts: {
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const result = await rawChatCompletion(messages, {
+      model,
+      maxTokens,
+      timeoutMs,
+      plugins,
       tools: [tool],
       tool_choice: { type: "function", function: { name: tool.function.name } },
     });
     if (!result.ok) return result;
 
-    const call = result.value.tool_calls?.[0];
+    const { message, finishReason } = result.value;
+    const call = message.tool_calls?.[0];
     if (call?.function.arguments) {
       try {
         const parsed = JSON.parse(call.function.arguments) as T;
-        console.log(`[lime-ai] forced tool call: ${tool.function.name}`, parsed);
+        // Log that a tool call landed, not its contents -- real statement
+        // and asset data flows through this function.
+        console.log(`[lime-ai] forced tool call: ${tool.function.name}`);
         return { ok: true, value: parsed };
       } catch {
         // fall through to retry
       }
     }
-    // Nudge and retry once.
+
+    // A truncated response failing to parse is a different problem than the
+    // model just not calling the tool -- retrying with the same max_tokens
+    // would truncate again. Surface it distinctly rather than exhausting the
+    // retry on a request that can't succeed as configured.
+    if (finishReason === "length") {
+      return { ok: false, error: "The model's response was cut off before it finished. Try again with a smaller input." };
+    }
+
+    // Push what the model actually said before nudging it -- without this
+    // the retry sees the original request plus a bare "please retry" with no
+    // record of what it tried the first time.
+    messages.push(message);
     messages.push({ role: "user", content: "Please call the tool with valid, complete JSON arguments." });
   }
 
-  return { ok: false, error: "The model didn't return usable structured data. Please try rephrasing what you pasted." };
+  return { ok: false, error: "The model didn't return usable structured data. Please try again." };
 }
