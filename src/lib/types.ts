@@ -151,6 +151,8 @@ export type BankStatementImportRecord = {
   period_start: string | null;
   period_end: string | null;
   has_running_balance: boolean | null;
+  opening_balance: number | null;
+  closing_balance: number | null;
   status: BankStatementImportStatus;
   error_message: string | null;
 };

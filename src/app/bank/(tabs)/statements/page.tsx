@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Plus, FileUp, FileText, Loader2, AlertTriangle, Landmark } from "lucide-react";
+import { Plus, FileUp, FileText, Loader2, AlertTriangle, Landmark, PlayCircle, ClipboardCheck } from "lucide-react";
 import clsx from "clsx";
 import { Card, CardBody } from "@/components/ui/Card";
 import Badge from "@/components/ui/Badge";
 import AddBankAccountModal from "@/components/bank/AddBankAccountModal";
+import ReviewStatementModal from "@/components/bank/ReviewStatementModal";
 import { createClient } from "@/lib/supabase/client";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { BankAccountRecord, BankStatementImportRecord, BankStatementImportStatus } from "@/lib/types";
@@ -25,15 +26,18 @@ const STATUS_TONE: Record<BankStatementImportStatus, "yellow" | "green" | "red" 
   failed: "red",
 };
 
-// Stage A never produces anything but "uploaded" — the other labels are here
-// for when Stage B starts actually moving statements through the pipeline.
 const STATUS_LABEL: Record<BankStatementImportStatus, string> = {
-  uploaded: "Uploaded — processing not yet available",
+  uploaded: "Uploaded",
   processing: "Processing",
   needs_review: "Needs review",
   completed: "Completed",
   failed: "Failed",
 };
+
+function accountLabel(imp: ImportRow): string {
+  if (!imp.bank_accounts) return "Unknown account";
+  return imp.bank_accounts.nickname ? `${imp.bank_accounts.bank_name} · ${imp.bank_accounts.nickname}` : imp.bank_accounts.bank_name;
+}
 
 export default function BankStatementsPage() {
   const { user } = useAuth();
@@ -44,6 +48,8 @@ export default function BankStatementsPage() {
   const [selectedAccountId, setSelectedAccountId] = useState<string>("");
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [processingIds, setProcessingIds] = useState<Set<string>>(new Set());
+  const [reviewImport, setReviewImport] = useState<ImportRow | null>(null);
 
   const loadData = useCallback(async () => {
     if (!user) return;
@@ -124,6 +130,29 @@ export default function BankStatementsPage() {
       return;
     }
 
+    await loadData();
+  }
+
+  async function handleProcess(importId: string) {
+    setProcessingIds((prev) => new Set(prev).add(importId));
+    try {
+      const res = await fetch("/api/bank/process-statement", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ statementImportId: importId }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        console.error("[bank/statements] process failed:", res.status, body?.error);
+      }
+    } catch (err) {
+      console.error("[bank/statements] process request failed:", err);
+    }
+    setProcessingIds((prev) => {
+      const next = new Set(prev);
+      next.delete(importId);
+      return next;
+    });
     await loadData();
   }
 
@@ -226,7 +255,9 @@ export default function BankStatementsPage() {
             <span>{uploadError}</span>
           </div>
         )}
-        <p className="mt-2 text-xs text-muted">PDF only, up to 15MB. Reading the file&apos;s contents isn&apos;t implemented yet.</p>
+        <p className="mt-2 text-xs text-muted">
+          PDF only, up to 15MB. After uploading, hit &ldquo;Process&rdquo; on it below to extract and categorize its transactions.
+        </p>
       </div>
 
       <div>
@@ -239,31 +270,76 @@ export default function BankStatementsPage() {
           <Card>
             <CardBody className="!px-0 !pt-0">
               <div className="divide-y divide-border/70">
-                {imports.map((imp) => (
-                  <div key={imp.id} className="flex flex-wrap items-center justify-between gap-2 px-5 py-4">
-                    <div className="flex items-center gap-3">
-                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-cream text-ink/60">
-                        <FileText size={16} />
-                      </span>
-                      <span>
-                        <span className="block text-sm font-semibold text-ink">{imp.file_name}</span>
-                        <span className="block text-xs text-muted">
-                          {imp.bank_accounts?.bank_name ?? "Unknown account"}
-                          {imp.bank_accounts?.nickname ? ` · ${imp.bank_accounts.nickname}` : ""} · {formatDate(imp.uploaded_at)}
+                {imports.map((imp) => {
+                  const isProcessing = imp.status === "processing" || processingIds.has(imp.id);
+                  return (
+                    <div key={imp.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+                      <div className="flex items-center gap-3">
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-cream text-ink/60">
+                          <FileText size={16} />
                         </span>
-                      </span>
+                        <span>
+                          <span className="block text-sm font-semibold text-ink">{imp.file_name}</span>
+                          <span className="block text-xs text-muted">
+                            {accountLabel(imp)} · {formatDate(imp.uploaded_at)}
+                          </span>
+                          {imp.status === "failed" && imp.error_message && (
+                            <span className="mt-1 flex items-start gap-1 text-xs text-red">
+                              <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                              {imp.error_message} — upload the file again to retry.
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Badge tone={STATUS_TONE[isProcessing ? "processing" : imp.status]}>
+                          {isProcessing ? STATUS_LABEL.processing : STATUS_LABEL[imp.status]}
+                        </Badge>
+                        {imp.status === "uploaded" && !isProcessing && (
+                          <button
+                            onClick={() => handleProcess(imp.id)}
+                            className="flex items-center gap-1.5 rounded-full bg-ink px-3 py-1.5 text-xs font-semibold text-yellow hover:opacity-90"
+                          >
+                            <PlayCircle size={14} /> Process
+                          </button>
+                        )}
+                        {isProcessing && <Loader2 size={16} className="animate-spin text-muted" />}
+                        {(imp.status === "needs_review" || imp.status === "completed") && (
+                          <button
+                            onClick={() => setReviewImport(imp)}
+                            className="flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs font-semibold text-ink/70 hover:bg-cream"
+                          >
+                            <ClipboardCheck size={14} /> Review
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    <Badge tone={STATUS_TONE[imp.status]}>{STATUS_LABEL[imp.status]}</Badge>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </CardBody>
           </Card>
+        )}
+        {imports.length > 0 && (
+          <p className="mt-2 text-xs text-muted">
+            &ldquo;Process&rdquo; extracts and categorizes transactions from the PDF. Reviewing an import afterward is optional — the
+            data is usable either way.
+          </p>
         )}
       </div>
 
       {showAddAccount && user && (
         <AddBankAccountModal userId={user.id} onClose={() => setShowAddAccount(false)} onAdded={handleAccountAdded} />
+      )}
+
+      {reviewImport && (
+        <ReviewStatementModal
+          importId={reviewImport.id}
+          fileName={reviewImport.file_name}
+          accountLabel={accountLabel(reviewImport)}
+          onClose={() => setReviewImport(null)}
+          onUpdated={loadData}
+        />
       )}
     </div>
   );

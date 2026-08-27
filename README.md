@@ -72,36 +72,67 @@ flow below still reads from `src/lib/mock/*` (which now starts empty too — the
 bank/brokerage/FBR integration behind any of it). Wiring more screens to real data, and swapping
 `net_worth_snapshots`'s `bank` category over to the pipeline below, are future passes.
 
-## Bank statement pipeline (Stage A)
+## Bank statement pipeline
 
-The second migration (`supabase/migrations/20260826120000_bank_statements.sql`) adds the first
-piece of a real bank statement pipeline — **schema, file storage, and upload capture only**. It
-does not read a PDF's contents yet:
+Two migrations build this up:
+
+- `supabase/migrations/20260826120000_bank_statements.sql` (**Stage A**) — schema, private
+  Storage bucket, upload capture.
+- `supabase/migrations/20260827090000_bank_statement_balances.sql` (**Stage B**) — adds
+  `opening_balance`/`closing_balance` to `bank_statement_imports`.
+
+Tables:
 
 - **`bank_accounts`** — metadata about an account the user has told the app about (bank, account
   type, optional nickname/masked account number).
 - **`bank_statement_imports`** — one row per uploaded PDF: which account, filename, upload time,
-  and a `status` (`uploaded` / `processing` / `needs_review` / `completed` / `failed`) that stays
-  at `uploaded` for now, since nothing yet moves it further.
-- **`bank_transactions`** — one row per transaction, linked to its account and import. Created
-  empty; no code path in this stage writes to it. The fixed category list it will eventually use
-  lives in `src/lib/bank/categories.ts`, mirrored exactly by a `check` constraint on the table.
+  stated period, stated opening/closing balance (if the statement prints them), whether it shows a
+  running balance per row, and a `status` (`uploaded` → `processing` → `needs_review`/`failed` →
+  `completed`).
+- **`bank_transactions`** — one row per transaction, linked to its account and import, with a
+  fixed `category` (`src/lib/bank/categories.ts`, mirrored by a `check` constraint) and a
+  `unique (account_id, fingerprint)` constraint used for dedup on re-import.
 
 All three follow the same per-user RLS pattern as `net_worth_snapshots` (explicit
 select/insert/update/delete policies checking `auth.uid() = user_id`), plus an extra check on
 insert that `account_id` (and, for transactions, `statement_import_id`) actually belongs to the
-signed-in user.
+signed-in user. Uploaded PDFs go to a **private Storage bucket, `bank-statements`**, at
+`{user_id}/{statement_import_id}/{original_filename}`, RLS-restricted the same way. The upload UI
+also enforces PDF-only and a 15MB size cap client-side.
 
-Uploaded PDFs go to a **private Supabase Storage bucket, `bank-statements`** (created by the same
-migration via `insert into storage.buckets ...` — nothing to set up separately), at
-`{user_id}/{statement_import_id}/{original_filename}`, with Storage RLS policies restricting
-access to whichever user's ID is the first path segment. The upload UI also enforces PDF-only and
-a 15MB size cap client-side.
+**Processing (Stage B)** — hit "Process" on an uploaded statement (**Bank → Statements**,
+`/bank/statements`) and `/api/bank/process-statement` runs synchronously, in one request:
 
-Try it at **Bank → Statements** (`/bank/statements`): add an account, upload a PDF, and see it
-listed with its status. That's the entire surface of this stage — there's no "process this
-statement" action, because nothing on the other end of it exists yet. Extracting transactions from
-the PDF, categorizing them, and computing balances are future stages.
+1. Extracts per-page text from the PDF (`src/lib/bank/extractPdfText.ts`, via `pdf-parse`) — this
+   is **text-only, no OCR and no vision model call**. A scanned/image-only PDF (or anything else
+   with no meaningful text layer) fails cleanly with `status = 'failed'` and a readable
+   `error_message`, rather than silently mishandling it.
+2. One LLM pass reads just the first/last page to record statement-level metadata: the stated
+   period (only if explicitly printed — never inferred from transaction dates), whether the
+   statement shows a running balance per row, and the stated opening/closing balance.
+3. One LLM pass per page-chunk (`src/lib/bank/statementExtraction.ts`) extracts transactions and
+   categorizes each one, forced to the fixed category list. Chunking is for output reliability,
+   not context-window limits — asking for a smaller batch per call is far less prone to truncated
+   output than one call emitting hundreds of rows.
+4. Each transaction gets a deterministic fingerprint (`src/lib/bank/fingerprint.ts`); inserting
+   relies on the `unique (account_id, fingerprint)` constraint (`ON CONFLICT DO NOTHING`) to skip
+   anything already imported, so re-uploading the same statement doesn't duplicate rows.
+5. The import row is updated with the extracted period/balances and `status = 'needs_review'` (or
+   `'failed'` with an error message if extraction didn't succeed).
+
+**Balance reconstruction is still out of scope.** For a statement without a running balance
+column, `balance_after`/`balance_source` stay `null` on every row from that import — only the
+statement's own stated opening/closing balance (if any) is captured, with no forward/backward
+calculation. That's a future stage.
+
+Review (optional, not required for the data to be usable) happens from the same import list —
+"Review" opens a table of the extracted transactions with an editable category per row and a
+"Confirm all" action that marks everything reviewed and the import `completed`. Leaving an import
+at `needs_review` is fine; nothing gates on it.
+
+Note: statement processing runs synchronously within one Vercel function call, capped at 60s on
+this project's (Hobby) plan — a statement with many page-chunks could exceed that on a slow model
+response. A background job queue would fix this properly; not built yet.
 
 ## Stack
 
@@ -111,9 +142,12 @@ the PDF, categorizing them, and computing balances are future stages.
 - **Recharts** for value-over-time and price charts
 - **lucide-react** for icons
 - **OpenRouter** (OpenAI-compatible `chat/completions`, tool calling) for the AI surfaces above
-- **Supabase** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password auth and the one
-  `net_worth_snapshots` table described above — this branch only
-- All financial data shown in the app lives in `src/lib/mock/*` — no backend, no other external calls
+  and for statement extraction/categorization
+- **Supabase** (`@supabase/supabase-js` + `@supabase/ssr`) for email/password auth, `net_worth_snapshots`,
+  and the bank statement pipeline described above
+- **`pdf-parse`** for server-side PDF text extraction (statement processing only — text, not vision)
+- Every other screen's data still lives in `src/lib/mock/*` — no real bank/brokerage/FBR
+  integration behind any of it
 
 ## What's built
 
