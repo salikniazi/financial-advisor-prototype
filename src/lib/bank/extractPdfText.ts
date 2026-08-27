@@ -1,5 +1,5 @@
 import "server-only";
-import type { PDFParse as PDFParseClass } from "pdf-parse";
+import pdfParse from "pdf-parse";
 
 export type PdfExtractionResult = { ok: true; pages: string[] } | { ok: false; error: string };
 
@@ -9,23 +9,29 @@ export type PdfExtractionResult = { ok: true; pages: string[] } | { ok: false; e
 // silently mishandling a statement we can't actually read.
 const MIN_CHARS_PER_PAGE = 40;
 
-// pdfjs-dist's legacy Node build (used internally by pdf-parse) tries to
-// polyfill DOMMatrix/ImageData/Path2D via the optional `@napi-rs/canvas`
-// package at module-LOAD time, and crashes the entire module outright if
-// that polyfill attempt fails -- which it reliably does in a Vercel
-// serverless bundle, since canvas's native binary isn't picked up by
-// Next's dependency tracing. We only ever call getText() here -- text
-// extraction never touches canvas/rendering -- so a bare stand-in is
-// enough to satisfy pdfjs's load-time check and skip that broken fallback
-// path entirely. This must run BEFORE pdf-parse's module graph loads,
-// which is why the import below is dynamic rather than static: a static
-// `import` at the top of this file would already have crashed by the
-// time this function body runs.
-function installPdfjsCanvasPolyfills() {
-  const g = globalThis as Record<string, unknown>;
-  if (typeof g.DOMMatrix === "undefined") g.DOMMatrix = class DOMMatrix {};
-  if (typeof g.ImageData === "undefined") g.ImageData = class ImageData {};
-  if (typeof g.Path2D === "undefined") g.Path2D = class Path2D {};
+// pdf-parse@1.x is used deliberately over the newer 2.x class-based API: 2.x
+// wraps pdfjs-dist's browser-oriented worker/canvas architecture, and both
+// its optional canvas polyfill (@napi-rs/canvas) and its worker script load
+// path failed to survive Next's serverless bundling on Vercel in practice
+// (missing-module errors for both, in two separate deploys). 1.x vendors an
+// old pdfjs-dist build directly and sets `PDFJS.disableWorker = true`
+// itself -- no worker, no canvas, nothing for a bundler to lose track of.
+type PageTextItem = { str: string; transform: number[] };
+type PdfPageProxy = { getTextContent: (opts?: Record<string, unknown>) => Promise<{ items: PageTextItem[] }> };
+
+async function renderPageText(pageData: PdfPageProxy): Promise<string> {
+  const { items } = await pageData.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false });
+  let lastY: number | undefined;
+  let text = "";
+  for (const item of items) {
+    if (lastY === item.transform[5] || lastY === undefined) {
+      text += item.str;
+    } else {
+      text += `\n${item.str}`;
+    }
+    lastY = item.transform[5];
+  }
+  return text;
 }
 
 /**
@@ -33,14 +39,15 @@ function installPdfjsCanvasPolyfills() {
  * order (not one flattened string) so callers can chunk page-aware.
  */
 export async function extractPdfPageTexts(buffer: Buffer): Promise<PdfExtractionResult> {
-  installPdfjsCanvasPolyfills();
-  const { PDFParse } = await import("pdf-parse");
-
-  let parser: PDFParseClass | null = null;
+  const pages: string[] = [];
   try {
-    parser = new PDFParse({ data: buffer });
-    const result = await parser.getText();
-    const pages = result.pages.map((p) => p.text ?? "");
+    await pdfParse(buffer, {
+      pagerender: async (pageData: PdfPageProxy) => {
+        const text = await renderPageText(pageData);
+        pages.push(text);
+        return text;
+      },
+    });
 
     if (pages.length === 0) {
       return { ok: false, error: "This PDF has no pages Lime could read." };
@@ -58,13 +65,5 @@ export async function extractPdfPageTexts(buffer: Buffer): Promise<PdfExtraction
     return { ok: true, pages };
   } catch (err) {
     return { ok: false, error: `Couldn't read this PDF: ${err instanceof Error ? err.message : String(err)}` };
-  } finally {
-    if (parser) {
-      try {
-        await parser.destroy();
-      } catch {
-        // best-effort cleanup; extraction result already captured above
-      }
-    }
   }
 }
