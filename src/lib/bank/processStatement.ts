@@ -38,8 +38,14 @@ export async function processStatementImport(supabase: SupabaseClient, importId:
   }
   const row = importRow as ImportRow;
 
-  if (row.status !== "uploaded") {
-    return { ok: false, error: `This statement is already ${row.status === "processing" ? "processing" : row.status} -- it can't be processed again.` };
+  // "processing" and "failed" are allowed as retry targets too, not just
+  // "uploaded": processing runs synchronously within one request, and a
+  // platform-level timeout kills that request outright (no JS exception
+  // this code can catch to mark it "failed" itself) -- so a statement that
+  // times out or hits a transient extraction error needs a way back in,
+  // not a permanent dead end that only a fresh re-upload can escape.
+  if (row.status === "needs_review" || row.status === "completed") {
+    return { ok: false, error: `This statement is already ${row.status} -- it can't be processed again.` };
   }
 
   await supabase.from("bank_statement_imports").update({ status: "processing" }).eq("id", importId);
@@ -66,16 +72,23 @@ export async function processStatementImport(supabase: SupabaseClient, importId:
     }
     const metadata = metadataResult.value;
 
+    // Run chunk extraction calls concurrently, not sequentially -- these are
+    // network-bound LLM calls, so wall-clock time is roughly the slowest
+    // single chunk rather than their sum. That matters a lot here: the whole
+    // request runs synchronously within one Vercel function call (no job
+    // queue at this stage) capped at 60s, and a multi-chunk statement
+    // processed sequentially can blow through that on its own. Promise.all
+    // preserves input order in its results regardless of completion timing,
+    // so page order is unaffected.
     const chunks = chunkPages(pages);
-    const allTransactions: ExtractedTransaction[] = [];
-    for (const chunk of chunks) {
-      const chunkText = chunk.join("\n\n");
-      const chunkResult = await extractTransactionsChunk({ chunkText, hasRunningBalance: metadata.has_running_balance });
-      if (!chunkResult.ok) {
-        return await fail(supabase, importId, `Couldn't read the statement's transactions: ${chunkResult.error}`);
-      }
-      allTransactions.push(...chunkResult.value);
+    const chunkResults = await Promise.all(
+      chunks.map((chunk) => extractTransactionsChunk({ chunkText: chunk.join("\n\n"), hasRunningBalance: metadata.has_running_balance }))
+    );
+    const failedChunk = chunkResults.find((r) => !r.ok);
+    if (failedChunk && !failedChunk.ok) {
+      return await fail(supabase, importId, `Couldn't read the statement's transactions: ${failedChunk.error}`);
     }
+    const allTransactions: ExtractedTransaction[] = chunkResults.flatMap((r) => (r.ok ? r.value : []));
 
     if (allTransactions.length === 0) {
       return await fail(supabase, importId, "Lime couldn't find any transactions in this statement.");

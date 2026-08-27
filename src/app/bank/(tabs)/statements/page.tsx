@@ -271,7 +271,15 @@ export default function BankStatementsPage() {
             <CardBody className="!px-0 !pt-0">
               <div className="divide-y divide-border/70">
                 {imports.map((imp) => {
-                  const isProcessing = imp.status === "processing" || processingIds.has(imp.id);
+                  // isProcessing: THIS tab actively has a request in flight for
+                  // this import right now. imp.status === "processing" alone
+                  // can also mean a past attempt died to a platform timeout and
+                  // never got to mark itself "failed" -- that's stale, not
+                  // active, so it still gets a retry action rather than being
+                  // stuck showing a spinner forever.
+                  const isProcessing = processingIds.has(imp.id);
+                  const staleProcessing = imp.status === "processing" && !isProcessing;
+                  const canRetry = (imp.status === "uploaded" || imp.status === "failed" || staleProcessing) && !isProcessing;
                   return (
                     <div key={imp.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
                       <div className="flex items-center gap-3">
@@ -286,21 +294,27 @@ export default function BankStatementsPage() {
                           {imp.status === "failed" && imp.error_message && (
                             <span className="mt-1 flex items-start gap-1 text-xs text-red">
                               <AlertTriangle size={12} className="mt-0.5 shrink-0" />
-                              {imp.error_message} — upload the file again to retry.
+                              {imp.error_message}
+                            </span>
+                          )}
+                          {staleProcessing && (
+                            <span className="mt-1 flex items-start gap-1 text-xs text-red">
+                              <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                              Didn&apos;t finish processing — try again.
                             </span>
                           )}
                         </span>
                       </div>
                       <div className="flex items-center gap-2">
                         <Badge tone={STATUS_TONE[isProcessing ? "processing" : imp.status]}>
-                          {isProcessing ? STATUS_LABEL.processing : STATUS_LABEL[imp.status]}
+                          {isProcessing ? STATUS_LABEL.processing : staleProcessing ? "Didn't finish" : STATUS_LABEL[imp.status]}
                         </Badge>
-                        {imp.status === "uploaded" && !isProcessing && (
+                        {canRetry && (
                           <button
                             onClick={() => handleProcess(imp.id)}
                             className="flex items-center gap-1.5 rounded-full bg-ink px-3 py-1.5 text-xs font-semibold text-yellow hover:opacity-90"
                           >
-                            <PlayCircle size={14} /> Process
+                            <PlayCircle size={14} /> {imp.status === "uploaded" ? "Process" : "Retry"}
                           </button>
                         )}
                         {isProcessing && <Loader2 size={16} className="animate-spin text-muted" />}
