@@ -155,6 +155,9 @@ export type BankStatementImportRecord = {
   closing_balance: number | null;
   status: BankStatementImportStatus;
   error_message: string | null;
+  parse_method: "vision" | "deterministic" | "fallback" | null;
+  validation_ok: boolean | null;
+  validation_note: string | null;
 };
 
 export type BankTransactionRecord = {

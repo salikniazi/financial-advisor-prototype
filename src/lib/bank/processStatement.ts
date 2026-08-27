@@ -1,11 +1,18 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { extractPdfPageTexts } from "@/lib/bank/extractPdfText";
-import { chunkPages, extractStatementMetadata, extractTransactionsChunk, ExtractedTransaction } from "@/lib/bank/statementExtraction";
-import { computeTransactionFingerprint } from "@/lib/bank/fingerprint";
+import { extractPageGeometry } from "@/lib/bank/pdfGeometry";
+import { splitPdfIntoPages } from "@/lib/bank/splitPdfPages";
+import { extractAllPages, VisionTransaction } from "@/lib/bank/visionExtract";
+import { verifyPage } from "@/lib/bank/verifyExtraction";
+import { deriveStatementFacts } from "@/lib/bank/statementFacts";
+import { validateRows, summarizeValidation } from "@/lib/bank/validate";
+import { categorizeDescriptions } from "@/lib/bank/categorize";
+import { computeTransactionFingerprint, assignOccurrenceIndexes } from "@/lib/bank/fingerprint";
+import { parseStatementDate } from "@/lib/bank/normalize";
+import type { ParsedTransactionRow, StatementPage } from "@/lib/bank/parseTypes";
 
 export type ProcessStatementResult =
-  | { ok: true; insertedCount: number; duplicateCount: number; totalExtracted: number }
+  | { ok: true; insertedCount: number; duplicateCount: number; totalExtracted: number; validationOk: boolean | null }
   | { ok: false; error: string };
 
 type ImportRow = {
@@ -17,10 +24,21 @@ type ImportRow = {
 };
 
 /**
- * Runs the full Stage B pipeline for one already-uploaded statement: download
- * the PDF, extract text, run the metadata + chunked transaction LLM passes,
- * dedupe + insert, and update the import row's status. Synchronous within one
- * request -- no background job queue at this stage (see Stage B prompt).
+ * Runs the full statement pipeline for one already-uploaded PDF: download,
+ * extract per-page geometry (for verification and deterministic facts),
+ * split into single-page PDFs and fan out vision extraction across them,
+ * verify every row against the PDF's own text layer, insert as durably as
+ * possible, then categorise.
+ *
+ * The LLM is used for exactly two things: reading a page's transactions
+ * (verified against the page's own text afterward, never trusted outright)
+ * and categorising merchants (the one genuinely subjective step). Everything
+ * else -- column geometry for verification, dates, amounts, the statement's
+ * own period/opening/closing balance, deduplication -- is deterministic.
+ * That's what fixed the original failure mode: the old metadata pass
+ * returned three different opening balances across three runs of the same
+ * file, because it asked a model to transcribe a number that regex could
+ * read off the page every time, identically.
  *
  * Every DB/storage operation uses the caller's own session-bound Supabase
  * client, so RLS enforces ownership throughout -- never a service-role
@@ -57,108 +75,151 @@ export async function processStatementImport(supabase: SupabaseClient, importId:
     }
     const buffer = Buffer.from(await fileBlob.arrayBuffer());
 
-    const extraction = await extractPdfPageTexts(buffer);
-    if (!extraction.ok) {
-      return await fail(supabase, importId, extraction.error);
+    // Geometry serves two purposes here, neither of which is primary
+    // extraction anymore: it's the verification oracle for vision output,
+    // and the deterministic source for statement facts (period, opening/
+    // closing balance). Its per-page unreadable-text gate also still
+    // protects against a partially-scanned PDF importing silently short.
+    const geometry = await extractPageGeometry(buffer);
+    if (!geometry.ok) {
+      return await fail(supabase, importId, geometry.error);
     }
-    const { pages } = extraction;
+    const { pages } = geometry;
 
-    const metadataResult = await extractStatementMetadata({
-      firstPageText: pages[0],
-      lastPageText: pages[pages.length - 1],
-    });
-    if (!metadataResult.ok) {
-      return await fail(supabase, importId, `Couldn't read the statement's metadata: ${metadataResult.error}`);
+    const pageBuffers = await splitPdfIntoPages(buffer);
+    const extractions = await extractAllPages(pageBuffers);
+
+    const failedPages = extractions.filter((e) => !e.ok);
+    if (failedPages.length === extractions.length) {
+      const firstError = failedPages[0] && !failedPages[0].ok ? failedPages[0].error : "unknown error";
+      return await fail(supabase, importId, `Couldn't read any page of this statement: ${firstError}`);
     }
-    const metadata = metadataResult.value;
 
-    // Run chunk extraction calls concurrently, not sequentially -- these are
-    // network-bound LLM calls, so wall-clock time is roughly the slowest
-    // single chunk rather than their sum. That matters a lot here: the whole
-    // request runs synchronously within one Vercel function call (no job
-    // queue at this stage) capped at 60s, and a multi-chunk statement
-    // processed sequentially can blow through that on its own. Promise.all
-    // preserves input order in its results regardless of completion timing,
-    // so page order is unaffected.
-    const chunks = chunkPages(pages);
-    const chunkResults = await Promise.all(
-      chunks.map((chunk) => extractTransactionsChunk({ chunkText: chunk.join("\n\n"), hasRunningBalance: metadata.has_running_balance }))
-    );
-    const failedChunk = chunkResults.find((r) => !r.ok);
-    if (failedChunk && !failedChunk.ok) {
-      return await fail(supabase, importId, `Couldn't read the statement's transactions: ${failedChunk.error}`);
+    const visionByPage = new Map<number, VisionTransaction[]>();
+    for (const e of extractions) if (e.ok) visionByPage.set(e.pageIndex, e.transactions);
+
+    // Verify every page's vision output against its own text layer. Rows
+    // are never silently dropped here for failing a trust check -- a row
+    // this code can't verify is still a row a human might be able to,
+    // and the whole point of this design is that a missing transaction is
+    // worse than an unverified one. Untrusted rows are counted into the
+    // validation note instead, so the review UI can flag the statement
+    // rather than presenting it as clean.
+    const parsedByPage = pages.map((page: StatementPage) => verifyPage(page, visionByPage.get(page.pageIndex) ?? []));
+
+    let untrustedCount = 0;
+    let unparseableDateCount = 0;
+    const rows: ParsedTransactionRow[] = [];
+    for (const page of parsedByPage) {
+      for (const { row: r, trusted } of page.rows) {
+        if (!trusted) untrustedCount++;
+        // A date that never parsed at all can't be stored -- normalize.ts's
+        // rule applies here too: reject rather than hand a bad string to a
+        // Postgres date cast. This is the one case dropped outright rather
+        // than flagged, because there's no valid row to flag.
+        if (!parseStatementDate(r.transactionDate)) {
+          unparseableDateCount++;
+          continue;
+        }
+        rows.push(r);
+      }
     }
-    const allTransactions: ExtractedTransaction[] = chunkResults.flatMap((r) => (r.ok ? r.value : []));
 
-    if (allTransactions.length === 0) {
+    if (rows.length === 0) {
       return await fail(supabase, importId, "Lime couldn't find any transactions in this statement.");
     }
 
-    const rows = allTransactions.map((t) => {
-      const debit = typeof t.debit === "number" ? t.debit : null;
-      const credit = typeof t.credit === "number" ? t.credit : null;
-      const balanceAfter = metadata.has_running_balance && typeof t.balance_after === "number" ? t.balance_after : null;
-      return {
-        user_id: row.user_id,
-        account_id: row.account_id,
-        statement_import_id: importId,
-        transaction_date: t.date,
-        description: t.description,
-        instrument_number: t.instrument_number || null,
-        debit,
-        credit,
-        balance_after: balanceAfter,
-        balance_source: balanceAfter != null ? ("stated" as const) : null,
-        category: t.category,
-        fingerprint: computeTransactionFingerprint({
-          accountId: row.account_id,
-          transactionDate: t.date,
-          debit,
-          credit,
-          description: t.description,
-        }),
-      };
+    const facts = deriveStatementFacts(pages, rows);
+    const validation = validateRows(rows, facts);
+
+    const occurrenceIndexes = assignOccurrenceIndexes(rows);
+    const dbRows = rows.map((r, i) => ({
+      user_id: row.user_id,
+      account_id: row.account_id,
+      statement_import_id: importId,
+      transaction_date: r.transactionDate,
+      description: r.description,
+      instrument_number: r.instrumentNumber,
+      debit: r.debit,
+      credit: r.credit,
+      balance_after: r.balanceAfter,
+      balance_source: r.balanceAfter != null ? ("stated" as const) : null,
+      category: "Uncategorized",
+      fingerprint: computeTransactionFingerprint({
+        accountId: row.account_id,
+        transactionDate: r.transactionDate,
+        debit: r.debit,
+        credit: r.credit,
+        description: r.description,
+        occurrenceIndex: occurrenceIndexes[i],
+      }),
+    }));
+
+    // Defensive backstop: assignOccurrenceIndexes should already make every
+    // fingerprint in this batch unique, but two rows colliding on identical
+    // content from independently-extracted pages (e.g. a description
+    // wrapping across a page boundary and getting picked up by both) is
+    // exactly the kind of thing worth guarding rather than assuming away.
+    // Identical fingerprints in one upsert array make ON CONFLICT DO
+    // NOTHING behave unpredictably.
+    const seenFingerprints = new Set<string>();
+    const dedupedRows = dbRows.filter((r) => {
+      if (seenFingerprints.has(r.fingerprint)) return false;
+      seenFingerprints.add(r.fingerprint);
+      return true;
     });
 
-    // Rely on the unique (account_id, fingerprint) constraint from Stage A:
-    // ON CONFLICT DO NOTHING via upsert+ignoreDuplicates skips anything
-    // already imported in one round trip. RETURNING only includes rows that
-    // were actually inserted, so the count difference tells us how many were
-    // duplicates.
+    // Insert before categorising: a categorisation failure should cost
+    // categories, not the whole statement. The parse is durable the moment
+    // this succeeds.
     const { data: insertedRows, error: insertError } = await supabase
       .from("bank_transactions")
-      .upsert(rows, { onConflict: "account_id,fingerprint", ignoreDuplicates: true })
-      .select("id");
+      .upsert(dedupedRows, { onConflict: "account_id,fingerprint", ignoreDuplicates: true })
+      .select("id, description");
 
     if (insertError) {
       return await fail(supabase, importId, `Couldn't save the extracted transactions: ${insertError.message}`);
     }
 
     const insertedCount = insertedRows?.length ?? 0;
-    const duplicateCount = rows.length - insertedCount;
+    const duplicateCount = dedupedRows.length - insertedCount;
 
-    // Prefer the statement's explicitly stated period; fall back to the
-    // extracted transactions' own date range (covers both "no explicit
-    // period printed" and, since this uses the full extracted set rather
-    // than only newly-inserted rows, "every transaction was a duplicate").
-    const dates = allTransactions.map((t) => t.date).sort();
-    const periodStart = metadata.period_start ?? dates[0];
-    const periodEnd = metadata.period_end ?? dates[dates.length - 1];
+    if (insertedRows && insertedRows.length > 0) {
+      const categories = await categorizeDescriptions(insertedRows.map((r) => r.description as string));
+      const idsByCategory = new Map<string, string[]>();
+      insertedRows.forEach((r, i) => {
+        const category = categories[i];
+        const ids = idsByCategory.get(category) ?? [];
+        ids.push(r.id as string);
+        idsByCategory.set(category, ids);
+      });
+      await Promise.all(
+        [...idsByCategory.entries()].map(([category, ids]) => supabase.from("bank_transactions").update({ category }).in("id", ids))
+      );
+    }
+
+    const noteParts = [summarizeValidation(validation)];
+    if (untrustedCount > 0) noteParts.push(`${untrustedCount} row${untrustedCount === 1 ? "" : "s"} couldn't be verified against the page's own text.`);
+    if (unparseableDateCount > 0) noteParts.push(`${unparseableDateCount} row${unparseableDateCount === 1 ? "" : "s"} had an unreadable date and were dropped.`);
+    if (failedPages.length > 0) noteParts.push(`${failedPages.length} page${failedPages.length === 1 ? "" : "s"} couldn't be read at all.`);
 
     await supabase
       .from("bank_statement_imports")
       .update({
         status: "needs_review",
-        period_start: periodStart,
-        period_end: periodEnd,
-        has_running_balance: metadata.has_running_balance,
-        opening_balance: metadata.opening_balance ?? null,
-        closing_balance: metadata.closing_balance ?? null,
+        period_start: facts.periodStart,
+        period_end: facts.periodEnd,
+        has_running_balance: facts.hasRunningBalance,
+        opening_balance: facts.openingBalance,
+        closing_balance: facts.closingBalance,
+        parse_method: "vision",
+        validation_ok: validation.ok && untrustedCount === 0,
+        validation_note: noteParts.join(" "),
         error_message: null,
       })
       .eq("id", importId);
 
-    return { ok: true, insertedCount, duplicateCount, totalExtracted: rows.length };
+    return { ok: true, insertedCount, duplicateCount, totalExtracted: dedupedRows.length, validationOk: validation.ok && untrustedCount === 0 };
   } catch (err) {
     return await fail(supabase, importId, err instanceof Error ? err.message : String(err));
   }

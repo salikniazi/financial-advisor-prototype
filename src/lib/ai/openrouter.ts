@@ -15,19 +15,12 @@ export const MODEL = "deepseek/deepseek-v4-flash-0731";
 // per-page but still just a handful of calls per statement), and correctness
 // matters more than cost -- this is the model that actually has to make sense
 // of an unfamiliar document, so reasoning quality is the only thing to
-// select on.
-//
-// The placeholder below is deliberately not a real model id. An earlier
-// version of this constant named a specific slug that turned out to be
-// fabricated -- there was no source for it, just a guess that looked
-// plausible. A wrong-but-real-looking slug can fail silently (OpenRouter
-// might resolve it to some other real model); a placeholder this obviously
-// not-a-slug can only ever fail loudly, which is what should happen until
-// someone actually confirms the real one against OpenRouter's live
-// catalogue. Override with OPENROUTER_REASONING_MODEL before deploying
-// anything that calls Role A.
-const REASONING_MODEL_PLACEHOLDER = "REPLACE_ME/verify-on-openrouter-before-deploy";
-export const REASONING_MODEL = process.env.OPENROUTER_REASONING_MODEL || REASONING_MODEL_PLACEHOLDER;
+// select on. Gemini 2.0 Flash was picked for native PDF ingestion (strong,
+// well-known document understanding) and cost -- not independently verified
+// against OpenRouter's live catalogue from this environment, so if it 404s
+// as an unknown model, that's the first thing to check. Override with
+// OPENROUTER_REASONING_MODEL without touching code.
+export const REASONING_MODEL = process.env.OPENROUTER_REASONING_MODEL || "google/gemini-2.0-flash-001";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
