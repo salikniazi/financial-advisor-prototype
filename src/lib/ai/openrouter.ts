@@ -15,12 +15,21 @@ export const MODEL = "deepseek/deepseek-v4-flash-0731";
 // per-page but still just a handful of calls per statement), and correctness
 // matters more than cost -- this is the model that actually has to make sense
 // of an unfamiliar document, so reasoning quality is the only thing to
-// select on. Gemini 2.0 Flash was picked for native PDF ingestion (strong,
-// well-known document understanding) and cost -- not independently verified
-// against OpenRouter's live catalogue from this environment, so if it 404s
-// as an unknown model, that's the first thing to check. Override with
-// OPENROUTER_REASONING_MODEL without touching code.
-export const REASONING_MODEL = process.env.OPENROUTER_REASONING_MODEL || "google/gemini-2.0-flash-001";
+// select on.
+//
+// google/gemini-2.5-flash: confirmed via OpenRouter's own model page
+// (WebSearch, since openrouter.ai itself is blocked by this sandbox's
+// egress proxy -- direct curl and WebFetch both fail with the same
+// EGRESS_BLOCKED error) to accept `tools` + `tool_choice`, and to accept
+// PDF/image/text/audio/video file input. That's the two things this
+// pipeline actually needs from Role A. An earlier version of this constant
+// pointed at gemini-2.0-flash-001, chosen without checking either of those
+// -- worth calling out since it shipped that way once already. Still not
+// independently exercised end to end (no live call from this environment),
+// so if it 404s as an unknown model or the file part is rejected, that's
+// the first thing to check. Override with OPENROUTER_REASONING_MODEL
+// without touching code.
+export const REASONING_MODEL = process.env.OPENROUTER_REASONING_MODEL || "google/gemini-2.5-flash";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
